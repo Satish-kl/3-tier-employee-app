@@ -10,14 +10,15 @@ pipeline {
 
         stage('Build Docker Images') {
             steps {
-                bat 'docker compose build'
+                sh 'docker compose build'
             }
         }
 
         stage('Verify Docker Images') {
             steps {
-                bat 'docker images'
+                sh 'docker images'
             }
         }
     }
 }
+ 
