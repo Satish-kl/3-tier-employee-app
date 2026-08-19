@@ -10,7 +10,7 @@ services:
     networks:
       - sameNetworkAsMysql # Connects the service to the 'sameNetworkAsMysql' network
     ports:
-      - 3307:3306 # Maps the container's port 3306 to the host's port 3307
+      - 3308:3306 # Maps the container's port 3306 to the host's port 3307
     volumes:
       - ./script.sql:/docker-entrypoint-initdb.d/script.sql
 
