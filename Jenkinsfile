@@ -8,9 +8,15 @@ pipeline {
             }
         }
 
-        stage('Build Docker Images') {
+        stage('Build API Image') {
             steps {
-                sh 'docker compose build'
+                sh 'docker compose build api'
+            }
+        }
+
+        stage('Build Frontend Image') {
+            steps {
+                sh 'docker compose build frontend'
             }
         }
 
@@ -21,4 +27,3 @@ pipeline {
         }
     }
 }
- 
