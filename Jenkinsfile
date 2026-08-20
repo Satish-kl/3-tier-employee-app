@@ -71,7 +71,7 @@ pipeline {
             }
         }
 
-                stage('Deploy to EC2') {
+        stage('Deploy to EC2') {
             steps {
                 sshagent(credentials: ['ec2-ssh-key']) {
                     sh '''
@@ -127,3 +127,15 @@ pipeline {
                 }
             }
         }
+    }
+
+    post {
+        success {
+            echo 'CI/CD pipeline completed successfully.'
+        }
+
+        failure {
+            echo 'CI/CD pipeline failed.'
+        }
+    }
+}
