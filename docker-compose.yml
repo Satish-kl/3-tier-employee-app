@@ -1,41 +1,62 @@
-version: "3.8"
-
 services:
-  db: # Defines the 'db' service for MySQL database
-    image: mysql:8.0 # Uses the MySQL 8.0 Docker image
-    environment: # Sets environment variables for the database configuration
-      - MYSQL_DATABASE=appdb # Specifies the name of the database
-      - MYSQL_PASSWORD=pass123 # Sets the password for the MySQL user
-      - MYSQL_ROOT_PASSWORD=pass123 # Sets the root password for MySQL
-    networks:
-      - sameNetworkAsMysql # Connects the service to the 'sameNetworkAsMysql' network
+
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: appdb
+      MYSQL_ROOT_PASSWORD: pass123
     ports:
-      - 3308:3306 # Maps the container's port 3306 to the host's port 3307
+      - "3308:3306"
     volumes:
-      - ./script.sql:/docker-entrypoint-initdb.d/script.sql
-
-  api: # Defines the 'api' service for the backend API
-    build: # Builds the backend API using the provided Dockerfile
-      context: ./backend # Specifies the build context directory for the backend
-      dockerfile: Dockerfile # Specifies the Dockerfile to use for building the backend
-    ports:
-      - 3000:3000 # Maps the container's port 3000 to the host's port 3000
+      - mysql_data:/var/lib/mysql
+      - ./script.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     networks:
-      - sameNetworkAsMysql # Connects the service to the 'sameNetworkAsMysql' network
-    depends_on:
-      - db # Specifies that the 'api' service depends on the 'db' service
+      - employee-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-ppass123"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
-  frontend: # Defines the 'frontend' service for the frontend app
-    restart: on-failure # Restarts the container if it fails
-    build: # Builds the frontend app using the provided Dockerfile
-      context: ./frontend # Specifies the build context directory for the frontend
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     ports:
-      - 3001:3000 # Maps the container's port 3000 to the host's port 3001
+      - "3000:3000"
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: pass123
+      DB_NAME: appdb
     networks:
-      - sameNetworkAsMysql # Connects the service to the 'sameNetworkAsMysql' network
+      - employee-network
     depends_on:
-      - api # Specifies that the 'frontend' service depends on the 'api' service
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3000"
+    networks:
+      - employee-network
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
 
 networks:
-  sameNetworkAsMysql: # Defines the 'sameNetworkAsMysql' network
-    driver: bridge # Specifies the network driver as 'bridge'
+  employee-network:
+    driver: bridge
+
+volumes:
+  mysql_data:

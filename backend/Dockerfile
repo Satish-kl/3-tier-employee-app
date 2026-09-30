@@ -1,20 +1,19 @@
-# Use the official Node.js 20 image as the base image
-FROM node:20
+FROM node:20-alpine
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Copy the package.json and package-lock.json files to the container
+ENV NODE_ENV=production
+
 COPY package*.json ./
 
-# Install the dependencies
-RUN npm install
+RUN npm ci --omit=dev
 
-# Copy the rest of the application's source code to the container
-COPY . .
+COPY server.js ./
 
-# Expose the port that the application listens on
+RUN chown -R node:node /app
+
+USER node
+
 EXPOSE 3000
 
-# Start the Node.js application
-CMD [ "npm", "start" ]
+CMD ["node", "server.js"]

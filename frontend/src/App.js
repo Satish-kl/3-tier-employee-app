@@ -2,7 +2,7 @@ import "./App.css";
 import axios from "axios";
 import React, { useState, useEffect } from "react";
 
-const URL = "http://35.173.29.47:3000";
+const URL = "/api";
 
 function App() {
   const [data, setData] = useState([]);
@@ -36,7 +36,7 @@ function App() {
 
     try {
       await axios.post(URL + "/user", {
-        data: inputValue,
+        name: inputValue,
       });
 
       setInputValue("");
@@ -61,7 +61,7 @@ function App() {
 
     try {
       await axios.put(URL + "/user/" + editId, {
-        data: inputValue,
+        name: inputValue,
       });
 
       setEditId(null);
@@ -96,28 +96,6 @@ function App() {
     setInputValue("");
   };
 
-  // Database initialization
-  const dbinit = async () => {
-    try {
-      const response = await axios.post(URL + "/dbinit");
-      console.log(response.data);
-      alert("Database initialized successfully");
-    } catch (error) {
-      console.error("Error initializing database:", error);
-    }
-  };
-
-  // Table initialization
-  const tbinit = async () => {
-    try {
-      const response = await axios.post(URL + "/tbinit");
-      console.log(response.data);
-      alert("Table initialized successfully");
-    } catch (error) {
-      console.error("Error initializing table:", error);
-    }
-  };
-
   return (
     <div className="App">
       <h1>User Management System</h1>
@@ -142,17 +120,6 @@ function App() {
       </div>
 
       <br />
-
-      <button style={{ backgroundColor: "red" }} onClick={dbinit}>
-        DB Init
-      </button>
-
-      <br />
-      <br />
-
-      <button style={{ backgroundColor: "orange" }} onClick={tbinit}>
-        Table Init
-      </button>
 
       <hr />
 

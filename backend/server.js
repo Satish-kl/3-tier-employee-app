@@ -1,223 +1,158 @@
 const express = require("express");
-const mysql = require("mysql2");
+const mysql = require("mysql2/promise");
 const cors = require("cors");
-const bodyParser = require("body-parser");
 
 const app = express();
+const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-const mysqlConfig = {
+// MySQL configuration
+const dbConfig = {
   host: process.env.DB_HOST || "db",
-  port: process.env.DB_PORT || "3306",
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "pass123",
   database: process.env.DB_NAME || "appdb",
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 };
 
-let con = null;
+// MySQL connection pool
+const pool = mysql.createPool(dbConfig);
 
-// Connect to MySQL
-const databaseInit = () => {
-  con = mysql.createConnection(mysqlConfig);
+// Health check endpoint
+app.get("/health", async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    await connection.ping();
+    connection.release();
 
-  con.connect((err) => {
-    if (err) {
-      console.error("Error connecting to the database:", err);
-      return;
-    }
+    res.status(200).json({
+      status: "OK",
+      message: "API and database are healthy"
+    });
+  } catch (error) {
+    console.error("Health check failed:", error);
 
-    console.log("Connected to the database");
-  });
-};
-
-// Create database
-const createDatabase = () => {
-  con.query(
-    "CREATE DATABASE IF NOT EXISTS appdb",
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return;
-      }
-
-      console.log("Database created successfully");
-    }
-  );
-};
-
-// Create table
-const createTable = () => {
-  con.query(
-    `CREATE TABLE IF NOT EXISTS apptb (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      name VARCHAR(255) NOT NULL
-    )`,
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return;
-      }
-
-      console.log("Table created successfully");
-    }
-  );
-};
-
-// ============================
-// READ - Get all users
-// ============================
-app.get("/user", (req, res) => {
-  databaseInit();
-
-  con.query(
-    "SELECT * FROM apptb",
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return res
-          .status(500)
-          .send("Error retrieving data from database");
-      }
-
-      res.json(results);
-    }
-  );
+    res.status(500).json({
+      status: "ERROR",
+      message: "Database connection failed"
+    });
+  }
 });
 
-// ============================
-// CREATE - Add a user
-// ============================
-app.post("/user", (req, res) => {
-  const { data } = req.body;
-
-  if (!data) {
-    return res.status(400).send("Name is required");
+// Get all employees
+app.get("/user", async (req, res) => {
+  try {
+    const [rows] = await pool.query("SELECT * FROM apptb");
+    res.status(200).json(rows);
+  } catch (error) {
+    console.error("GET /user error:", error);
+    res.status(500).json({
+      error: "Failed to fetch employees",
+      details: error.message
+    });
   }
+});
 
-  if (!con) {
-    databaseInit();
-  }
+// Create employee
+app.post("/user", async (req, res) => {
+  try {
+    const { name } = req.body;
 
-  con.query(
-    "INSERT INTO apptb (name) VALUES (?)",
-    [data],
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return res
-          .status(500)
-          .send("Error inserting data into database");
-      }
-
-      res.json({
-        message: "User created successfully",
-        id: results.insertId,
-        name: data,
+    if (!name) {
+      return res.status(400).json({
+        error: "name is required"
       });
     }
-  );
+
+    const [result] = await pool.query(
+      "INSERT INTO apptb (name) VALUES (?)",
+      [name]
+    );
+
+    res.status(201).json({
+      message: "Employee created successfully",
+      id: result.insertId
+    });
+  } catch (error) {
+    console.error("POST /user error:", error);
+
+    res.status(500).json({
+      error: "Failed to create employee",
+      details: error.message
+    });
+  }
 });
 
-// ============================
-// UPDATE - Update a user
-// ============================
-app.put("/user/:id", (req, res) => {
-  const { id } = req.params;
-  const { data } = req.body;
+// Update employee
+app.put("/user/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
 
-  if (!data) {
-    return res.status(400).send("Name is required");
-  }
-
-  if (!con) {
-    databaseInit();
-  }
-
-  con.query(
-    "UPDATE apptb SET name = ? WHERE id = ?",
-    [data, id],
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return res
-          .status(500)
-          .send("Error updating data in database");
-      }
-
-      if (results.affectedRows === 0) {
-        return res.status(404).send("User not found");
-      }
-
-      res.json({
-        message: "User updated successfully",
-        id: id,
-        name: data,
+    if (!name) {
+      return res.status(400).json({
+        error: "name is required"
       });
     }
-  );
-});
 
-// ============================
-// DELETE - Delete a user
-// ============================
-app.delete("/user/:id", (req, res) => {
-  const { id } = req.params;
+    const [result] = await pool.query(
+      "UPDATE apptb SET name = ? WHERE id = ?",
+      [name, id]
+    );
 
-  if (!con) {
-    databaseInit();
-  }
-
-  con.query(
-    "DELETE FROM apptb WHERE id = ?",
-    [id],
-    (err, results) => {
-      if (err) {
-        console.error(err);
-        return res
-          .status(500)
-          .send("Error deleting data from database");
-      }
-
-      if (results.affectedRows === 0) {
-        return res.status(404).send("User not found");
-      }
-
-      res.json({
-        message: "User deleted successfully",
-        id: id,
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Employee not found"
       });
     }
-  );
-});
 
-// ============================
-// Database initialization
-// ============================
-app.post("/dbinit", (req, res) => {
-  databaseInit();
-  createDatabase();
+    res.status(200).json({
+      message: "Employee updated successfully"
+    });
+  } catch (error) {
+    console.error("PUT /user/:id error:", error);
 
-  res.json("Database created successfully");
-});
-
-// ============================
-// Table initialization
-// ============================
-app.post("/tbinit", (req, res) => {
-  if (!con) {
-    databaseInit();
+    res.status(500).json({
+      error: "Failed to update employee",
+      details: error.message
+    });
   }
-
-  createTable();
-
-  res.json("Table created successfully");
 });
 
-// ============================
+// Delete employee
+app.delete("/user/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [result] = await pool.query(
+      "DELETE FROM apptb WHERE id = ?",
+      [id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        error: "Employee not found"
+      });
+    }
+
+    res.status(200).json({
+      message: "Employee deleted successfully"
+    });
+  } catch (error) {
+    console.error("DELETE /user/:id error:", error);
+    res.status(500).json({
+      error: "Failed to delete employee",
+      details: error.message
+    });
+  }
+});
+
 // Start server
-// ============================
-app.listen(3000, () => {
-  console.log("Server running on port 3000");
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
