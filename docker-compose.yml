@@ -22,6 +22,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: ${API_IMAGE:-satishdd/docker-mysql-nodejs-reactjs-app-api:latest}
     ports:
       - "3000:3000"
     environment:
@@ -45,6 +46,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: ${FRONTEND_IMAGE:-satishdd/docker-mysql-nodejs-reactjs-app-frontend:latest}
     ports:
       - "3001:3000"
     networks:
