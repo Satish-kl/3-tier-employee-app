@@ -2,12 +2,10 @@ pipeline {
     agent any
 
     environment {
+        APP_DIR = '/home/ubuntu/3-tier-employee-app'
+
         API_IMAGE = 'satishdd/docker-mysql-nodejs-reactjs-app-api:latest'
         FRONTEND_IMAGE = 'satishdd/docker-mysql-nodejs-reactjs-app-frontend:latest'
-
-        EC2_HOST = '35.173.29.47'
-        EC2_USER = 'ubuntu'
-        APP_DIR = '/home/ubuntu/3-tier-employee-app'
     }
 
     stages {
@@ -21,6 +19,7 @@ pipeline {
         stage('Validate Compose') {
             steps {
                 sh '''
+                    set -e
                     docker compose config -q
                 '''
             }
@@ -29,6 +28,7 @@ pipeline {
         stage('Application Test') {
             steps {
                 sh '''
+                    set -e
                     docker compose build api
                     docker compose run --rm --no-deps api npm test
                 '''
@@ -38,7 +38,16 @@ pipeline {
         stage('Build Docker Images') {
             steps {
                 sh '''
+                    set -e
                     docker compose build api frontend
+
+                    docker tag \
+                      $(docker compose images -q api) \
+                      ${API_IMAGE}
+
+                    docker tag \
+                      $(docker compose images -q frontend) \
+                      ${FRONTEND_IMAGE}
                 '''
             }
         }
@@ -46,8 +55,15 @@ pipeline {
         stage('Verify Docker Images') {
             steps {
                 sh '''
-                    docker image inspect "$API_IMAGE"
-                    docker image inspect "$FRONTEND_IMAGE"
+                    set -e
+
+                    echo "Checking API image..."
+                    docker image inspect ${API_IMAGE}
+
+                    echo "Checking Frontend image..."
+                    docker image inspect ${FRONTEND_IMAGE}
+
+                    echo "Docker images verified successfully."
                 '''
             }
         }
@@ -55,24 +71,26 @@ pipeline {
         stage('Trivy Scan') {
             steps {
                 sh '''
-                    mkdir -p trivy-reports
+                    set +e
 
+                    echo "Scanning API image..."
                     trivy image \
-                        --severity HIGH,CRITICAL \
-                        --format table \
-                        --output trivy-reports/api-trivy.txt \
-                        "$API_IMAGE" || true
+                      --severity HIGH,CRITICAL \
+                      --exit-code 0 \
+                      ${API_IMAGE}
 
+                    echo "Scanning Frontend image..."
                     trivy image \
-                        --severity HIGH,CRITICAL \
-                        --format table \
-                        --output trivy-reports/frontend-trivy.txt \
-                        "$FRONTEND_IMAGE" || true
+                      --severity HIGH,CRITICAL \
+                      --exit-code 0 \
+                      ${FRONTEND_IMAGE}
+
+                    echo "Trivy scanning completed."
                 '''
             }
         }
 
-        stage('Login to Docker Hub') {
+        stage('Docker Hub Login') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -82,9 +100,11 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -e
+
                         echo "$DOCKER_PASSWORD" | docker login \
-                            -u "$DOCKER_USERNAME" \
-                            --password-stdin
+                          -u "$DOCKER_USERNAME" \
+                          --password-stdin
                     '''
                 }
             }
@@ -93,232 +113,192 @@ pipeline {
         stage('Push Docker Images') {
             steps {
                 sh '''
-                    docker push "$API_IMAGE"
-                    docker push "$FRONTEND_IMAGE"
+                    set -e
+
+                    docker push ${API_IMAGE}
+                    docker push ${FRONTEND_IMAGE}
+
+                    echo "Docker images pushed successfully."
                 '''
             }
         }
 
         stage('Deploy to EC2') {
             steps {
-                sshagent(credentials: ['ec2-ssh-key']) {
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "
-                            set -e
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -e
 
-                            cd '${APP_DIR}'
+                        echo "Deploying application to EC2..."
+                        echo "API Image: ${API_IMAGE}"
+                        echo "Frontend Image: ${FRONTEND_IMAGE}"
 
-                            echo '========================================'
-                            echo 'Saving current images for rollback'
-                            echo '========================================'
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USER@35.173.29.47" "
+                                set -e
 
-                            PREVIOUS_API_IMAGE=\\\$(docker inspect -f '{{.Config.Image}}' 3-tier-employee-app-api-1 2>/dev/null || true)
-                            PREVIOUS_FRONTEND_IMAGE=\\\$(docker inspect -f '{{.Config.Image}}' 3-tier-employee-app-frontend-1 2>/dev/null || true)
+                                APP_DIR='/home/ubuntu/3-tier-employee-app'
+                                API_IMAGE='satishdd/docker-mysql-nodejs-reactjs-app-api:latest'
+                                FRONTEND_IMAGE='satishdd/docker-mysql-nodejs-reactjs-app-frontend:latest'
 
-                            echo \\\"Previous API image: \\\$PREVIOUS_API_IMAGE\\\"
-                            echo \\\"Previous Frontend image: \\\$PREVIOUS_FRONTEND_IMAGE\\\"
+                                cd \$APP_DIR
 
-                            echo '========================================'
-                            echo 'Pulling latest Docker images'
-                            echo '========================================'
+                                echo '======================================'
+                                echo 'Current Application Status'
+                                echo '======================================'
+                                docker compose ps || true
 
-                            docker pull '${API_IMAGE}'
-                            docker pull '${FRONTEND_IMAGE}'
+                                echo '======================================'
+                                echo 'Saving Current Images for Rollback'
+                                echo '======================================'
 
-                            echo '========================================'
-                            echo 'Deploying with Docker Compose'
-                            echo '========================================'
+                                PREVIOUS_API_IMAGE=\\$(docker inspect -f '{{.Config.Image}}' 3-tier-employee-app-api-1 2>/dev/null || true)
+                                PREVIOUS_FRONTEND_IMAGE=\\$(docker inspect -f '{{.Config.Image}}' 3-tier-employee-app-frontend-1 2>/dev/null || true)
 
-                            DEPLOY_SUCCESS=true
+                                echo \"Previous API image: \\$PREVIOUS_API_IMAGE\"
+                                echo \"Previous Frontend image: \\$PREVIOUS_FRONTEND_IMAGE\"
 
-                            if ! API_IMAGE='${API_IMAGE}' FRONTEND_IMAGE='${FRONTEND_IMAGE}' docker compose up -d --no-build; then
-                                echo 'Docker Compose deployment failed'
-                                DEPLOY_SUCCESS=false
-                            fi
+                                echo '======================================'
+                                echo 'Pulling Latest Docker Images'
+                                echo '======================================'
 
-                            if [ \\\"\\\$DEPLOY_SUCCESS\\\" = 'true' ]; then
+                                docker pull \\$API_IMAGE
+                                docker pull \\$FRONTEND_IMAGE
 
-                                echo '========================================'
-                                echo 'Waiting for services'
-                                echo '========================================'
+                                echo '======================================'
+                                echo 'Deploying Latest Containers'
+                                echo '======================================'
+
+                                API_IMAGE=\\$API_IMAGE FRONTEND_IMAGE=\\$FRONTEND_IMAGE \
+                                docker compose up -d --no-build
+
+                                echo '======================================'
+                                echo 'Waiting for Containers'
+                                echo '======================================'
 
                                 sleep 15
 
-                                echo '========================================'
-                                echo 'Compose status'
-                                echo '========================================'
+                                echo '======================================'
+                                echo 'Container Status'
+                                echo '======================================'
 
                                 docker compose ps
 
-                                echo '========================================'
-                                echo 'Checking API health'
-                                echo '========================================'
+                                echo '======================================'
+                                echo 'API Health Check'
+                                echo '======================================'
 
-                                if curl -f http://localhost:3000/health; then
-                                    echo 'API health check PASSED'
-                                else
-                                    echo 'API health check FAILED'
-                                    DEPLOY_SUCCESS=false
-                                fi
+                                HEALTH_RESPONSE=\\$(curl -fsS http://localhost:3000/health)
 
-                            fi
+                                echo \"\\$HEALTH_RESPONSE\"
 
-                            if [ \\\"\\\$DEPLOY_SUCCESS\\\" = 'true' ]; then
+                                echo '======================================'
+                                echo 'API CRUD Check'
+                                echo '======================================'
 
-                                echo '========================================'
-                                echo 'Checking API data'
-                                echo '========================================'
+                                USER_RESPONSE=\\$(curl -fsS http://localhost:3000/user)
 
-                                if curl -f http://localhost:3000/user; then
-                                    echo 'API data check PASSED'
-                                else
-                                    echo 'API data check FAILED'
-                                    DEPLOY_SUCCESS=false
-                                fi
+                                echo \"\\$USER_RESPONSE\"
 
-                            fi
+                                echo '======================================'
+                                echo 'Frontend Check'
+                                echo '======================================'
 
-                            if [ \\\"\\\$DEPLOY_SUCCESS\\\" = 'true' ]; then
+                                curl -fsS http://localhost:3001 > /dev/null
 
-                                echo '========================================'
-                                echo 'Checking Frontend'
-                                echo '========================================'
+                                echo 'Frontend is responding successfully.'
 
-                                if curl -f http://localhost:3001; then
-                                    echo 'Frontend health check PASSED'
-                                else
-                                    echo 'Frontend health check FAILED'
-                                    DEPLOY_SUCCESS=false
-                                fi
-
-                            fi
-
-                            if [ \\\"\\\$DEPLOY_SUCCESS\\\" = 'true' ]; then
-
-                                echo '========================================'
+                                echo '======================================'
                                 echo 'DEPLOYMENT SUCCESSFUL'
-                                echo '========================================'
-
-                            else
-
-                                echo '========================================'
-                                echo 'DEPLOYMENT FAILED'
-                                echo 'STARTING ROLLBACK'
-                                echo '========================================'
-
-                                if [ -n \\\"\\\$PREVIOUS_API_IMAGE\\\" ] && [ -n \\\"\\\$PREVIOUS_FRONTEND_IMAGE\\\" ]; then
-
-                                    echo 'Restoring previous API image:'
-                                    echo \\\"\\\$PREVIOUS_API_IMAGE\\\"
-
-                                    echo 'Restoring previous Frontend image:'
-                                    echo \\\"\\\$PREVIOUS_FRONTEND_IMAGE\\\"
-
-                                    API_IMAGE=\\\"\\\$PREVIOUS_API_IMAGE\\\" \\
-                                    FRONTEND_IMAGE=\\\"\\\$PREVIOUS_FRONTEND_IMAGE\\\" \\
-                                    docker compose up -d --no-build
-
-                                    echo '========================================'
-                                    echo 'ROLLBACK COMPLETED'
-                                    echo '========================================'
-
-                                    docker compose ps
-
-                                    echo 'Checking API after rollback...'
-                                    curl -f http://localhost:3000/health
-
-                                    echo 'Rollback verification completed.'
-
-                                else
-
-                                    echo 'Previous images were not found.'
-                                    echo 'Rollback could not be performed.'
-
-                                fi
-
-                                exit 1
-
-                            fi
-
-                            echo '========================================'
-                            echo 'Deployment verification completed'
-                            echo '========================================'
-                        "
-                    """
+                                echo '======================================'
+                            "
+                    '''
                 }
             }
         }
 
         stage('Deployment Verification') {
             steps {
-                sh """
-                    ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} "
+                withCredentials([
+                    sshUserPrivateKey(
+                        credentialsId: 'ec2-ssh-key',
+                        keyFileVariable: 'SSH_KEY',
+                        usernameVariable: 'SSH_USER'
+                    )
+                ]) {
+                    sh '''
                         set -e
 
-                        cd '${APP_DIR}'
+                        echo "Final deployment verification..."
 
-                        echo '========================================'
-                        echo 'Final service status'
-                        echo '========================================'
+                        ssh -i "$SSH_KEY" \
+                            -o StrictHostKeyChecking=no \
+                            "$SSH_USER@35.173.29.47" "
+                                set -e
 
-                        docker compose ps
+                                cd /home/ubuntu/3-tier-employee-app
 
-                        echo '========================================'
-                        echo 'Final API health check'
-                        echo '========================================'
+                                echo 'Container status:'
+                                docker compose ps
 
-                        curl -f http://localhost:3000/health
+                                echo 'API health:'
+                                curl -fsS http://localhost:3000/health
 
-                        echo '========================================'
-                        echo 'Final API data check'
-                        echo '========================================'
+                                echo
+                                echo 'API users:'
+                                curl -fsS http://localhost:3000/user
 
-                        curl -f http://localhost:3000/user
+                                echo
+                                echo 'Frontend check:'
+                                curl -fsS http://localhost:3001 > /dev/null
 
-                        echo '========================================'
-                        echo 'Final Frontend check'
-                        echo '========================================'
-
-                        curl -f http://localhost:3001
-
-                        echo '========================================'
-                        echo 'Database persistent volume'
-                        echo '========================================'
-
-                        docker volume ls | grep mysql_data || true
-
-                        echo '========================================'
-                        echo 'Deployment verification PASSED'
-                        echo '========================================'
-                    "
-                """
+                                echo 'Frontend is healthy.'
+                            "
+                    '''
+                }
             }
         }
 
         stage('Docker Cleanup') {
             steps {
                 sh '''
+                    set +e
+
+                    echo "Cleaning unused Docker resources..."
+
+                    docker container prune -f
                     docker image prune -f
+
+                    echo "Docker cleanup completed."
                 '''
             }
         }
     }
 
     post {
-
-        always {
-            archiveArtifacts(
-                artifacts: 'trivy-reports/*.txt',
-                allowEmptyArchive: true
-            )
-        }
-
         success {
-            echo 'CI/CD pipeline completed successfully.'
+            echo '======================================'
+            echo 'JENKINS CI/CD PIPELINE SUCCESSFUL'
+            echo '======================================'
         }
 
         failure {
-            echo 'CI/CD pipeline failed. Check the Jenkins console output.'
+            echo '======================================'
+            echo 'JENKINS CI/CD PIPELINE FAILED'
+            echo 'Check the failed stage and console log.'
+            echo '======================================'
+        }
+
+        always {
+            echo 'Pipeline execution completed.'
         }
     }
 }
+
