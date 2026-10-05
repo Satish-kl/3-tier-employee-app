@@ -188,7 +188,16 @@ pipeline {
             }
         }
 
-        stage('Deploy to EC2') {
+        /*
+         * ============================================================
+         * NEW ROLLBACK SUPPORT
+         * ============================================================
+         *
+         * Before deploying the new :latest images, save the currently
+         * running EC2 images as :rollback.
+         */
+
+        stage('Backup Current EC2 Images') {
             steps {
                 withCredentials([
                     sshUserPrivateKey(
@@ -197,16 +206,13 @@ pipeline {
                         usernameVariable: 'SSH_USER'
                     )
                 ]) {
+
                     sh '''
                         set -e
 
                         echo "======================================"
-                        echo "DEPLOYING TO EC2"
+                        echo "BACKING UP CURRENT EC2 IMAGES"
                         echo "======================================"
-
-                        echo "API_IMAGE: ${API_IMAGE}"
-                        echo "FRONTEND_IMAGE: ${FRONTEND_IMAGE}"
-                        echo "EC2_HOST: ${EC2_HOST}"
 
                         ssh -o StrictHostKeyChecking=no \
                             -i "$SSH_KEY" \
@@ -215,29 +221,51 @@ pipeline {
 
                         set -e
 
-                        echo "Connected to EC2 successfully."
-
                         cd ~/3-tier-employee-app
 
-                        echo "Pulling latest API image..."
-                        docker pull "$API_IMAGE"
+                        echo "Checking currently running containers..."
 
-                        echo "Pulling latest Frontend image..."
-                        docker pull "$FRONTEND_IMAGE"
+                        API_CONTAINER="3-tier-employee-app-api-1"
+                        FRONTEND_CONTAINER="3-tier-employee-app-frontend-1"
 
-                        echo "Stopping existing application containers..."
-                        docker compose down
+                        API_CURRENT=$(docker inspect --format='{{.Image}}' "$API_CONTAINER" 2>/dev/null || true)
+                        FRONTEND_CURRENT=$(docker inspect --format='{{.Image}}' "$FRONTEND_CONTAINER" 2>/dev/null || true)
 
-                        echo "Starting application with latest images..."
-                        docker compose up -d
+                        if [ -n "$API_CURRENT" ]; then
 
-                        echo "Waiting for containers to start..."
-                        sleep 15
+                            echo "Current API image ID:"
+                            echo "$API_CURRENT"
 
-                        echo "Current containers:"
-                        docker compose ps
+                            docker tag "$API_CURRENT" "${API_IMAGE%:*}:rollback"
 
-                        echo "EC2 deployment completed."
+                            echo "API rollback image created."
+
+                        else
+
+                            echo "No current API container found."
+
+                        fi
+
+                        if [ -n "$FRONTEND_CURRENT" ]; then
+
+                            echo "Current Frontend image ID:"
+                            echo "$FRONTEND_CURRENT"
+
+                            docker tag "$FRONTEND_CURRENT" "${FRONTEND_IMAGE%:*}:rollback"
+
+                            echo "Frontend rollback image created."
+
+                        else
+
+                            echo "No current Frontend container found."
+
+                        fi
+
+                        echo "======================================"
+                        echo "CURRENT IMAGES BACKED UP"
+                        echo "======================================"
+
+                        docker images | grep "rollback" || true
 
 REMOTE_SCRIPT
                     '''
@@ -245,8 +273,150 @@ REMOTE_SCRIPT
             }
         }
 
-        stage('Deployment Verification') {
+        /*
+         * ============================================================
+         * DEPLOYMENT + VERIFICATION
+         * ============================================================
+         *
+         * If deployment or verification fails, catchError allows the
+         * pipeline to continue to the rollback stage.
+         */
+
+        stage('Deploy and Verify') {
+
             steps {
+
+                catchError(
+                    buildResult: 'FAILURE',
+                    stageResult: 'FAILURE'
+                ) {
+
+                    withCredentials([
+                        sshUserPrivateKey(
+                            credentialsId: "${EC2_CREDENTIALS}",
+                            keyFileVariable: 'SSH_KEY',
+                            usernameVariable: 'SSH_USER'
+                        )
+                    ]) {
+
+                        sh '''
+                            set -e
+
+                            echo "======================================"
+                            echo "DEPLOYING TO EC2"
+                            echo "======================================"
+
+                            echo "API_IMAGE: ${API_IMAGE}"
+                            echo "FRONTEND_IMAGE: ${FRONTEND_IMAGE}"
+                            echo "EC2_HOST: ${EC2_HOST}"
+
+                            ssh -o StrictHostKeyChecking=no \
+                                -i "$SSH_KEY" \
+                                "$SSH_USER@$EC2_HOST" \
+                                "API_IMAGE='${API_IMAGE}' FRONTEND_IMAGE='${FRONTEND_IMAGE}' bash -s" <<'REMOTE_SCRIPT'
+
+                            set -e
+
+                            echo "Connected to EC2 successfully."
+
+                            cd ~/3-tier-employee-app
+
+                            echo "Pulling latest API image..."
+                            docker pull "$API_IMAGE"
+
+                            echo "Pulling latest Frontend image..."
+                            docker pull "$FRONTEND_IMAGE"
+
+                            echo "Stopping existing application containers..."
+                            docker compose down
+
+                            echo "Starting application with latest images..."
+                            docker compose up -d
+
+                            echo "Waiting for containers to start..."
+                            sleep 15
+
+                            echo "Current containers:"
+                            docker compose ps
+
+                            echo "EC2 deployment completed."
+
+REMOTE_SCRIPT
+
+                            echo "======================================"
+                            echo "VERIFYING EC2 DEPLOYMENT"
+                            echo "======================================"
+
+                            ssh -o StrictHostKeyChecking=no \
+                                -i "$SSH_KEY" \
+                                "$SSH_USER@$EC2_HOST" \
+                                "bash -s" <<'REMOTE_SCRIPT'
+
+                            set -e
+
+                            cd ~/3-tier-employee-app
+
+                            echo "Checking Docker containers..."
+                            docker compose ps
+
+                            echo "Checking API health..."
+
+                            for i in 1 2 3 4 5 6; do
+
+                                if curl -fsS http://localhost:3000/health; then
+                                    echo
+                                    echo "API health check successful."
+                                    break
+                                fi
+
+                                echo "API not ready yet. Waiting..."
+                                sleep 5
+
+                                if [ "$i" = "6" ]; then
+
+                                    echo "API health check failed."
+
+                                    docker compose logs --tail=100 api
+
+                                    exit 1
+
+                                fi
+
+                            done
+
+                            echo "Checking employee API..."
+
+                            curl -fsS http://localhost:3000/user
+
+                            echo
+
+                            echo "Deployment verification successful."
+
+REMOTE_SCRIPT
+                        '''
+                    }
+                }
+            }
+        }
+
+        /*
+         * ============================================================
+         * ROLLBACK
+         * ============================================================
+         *
+         * This stage executes when Deploy and Verify failed.
+         */
+
+        stage('Rollback') {
+
+            when {
+                expression {
+                    currentBuild.currentResult == 'FAILURE'
+                }
+            }
+
+            steps {
+
                 withCredentials([
                     sshUserPrivateKey(
                         credentialsId: "${EC2_CREDENTIALS}",
@@ -254,50 +424,74 @@ REMOTE_SCRIPT
                         usernameVariable: 'SSH_USER'
                     )
                 ]) {
+
                     sh '''
                         set -e
 
                         echo "======================================"
-                        echo "VERIFYING EC2 DEPLOYMENT"
+                        echo "ROLLBACK INITIATED"
                         echo "======================================"
 
                         ssh -o StrictHostKeyChecking=no \
                             -i "$SSH_KEY" \
                             "$SSH_USER@$EC2_HOST" \
-                            "bash -s" <<'REMOTE_SCRIPT'
+                            "API_IMAGE='${API_IMAGE}' FRONTEND_IMAGE='${FRONTEND_IMAGE}' bash -s" <<'REMOTE_SCRIPT'
 
                         set -e
 
                         cd ~/3-tier-employee-app
 
-                        echo "Checking Docker containers..."
+                        echo "Checking rollback images..."
+
+                        docker image inspect "${API_IMAGE%:*}:rollback"
+
+                        docker image inspect "${FRONTEND_IMAGE%:*}:rollback"
+
+                        echo "Rollback images found."
+
+                        echo "Stopping failed deployment..."
+
+                        docker compose down
+
+                        echo "Restoring previous API image..."
+
+                        docker tag \
+                            "${API_IMAGE%:*}:rollback" \
+                            "${API_IMAGE}"
+
+                        echo "Restoring previous Frontend image..."
+
+                        docker tag \
+                            "${FRONTEND_IMAGE%:*}:rollback" \
+                            "${FRONTEND_IMAGE}"
+
+                        echo "Starting previous stable version..."
+
+                        docker compose up -d
+
+                        echo "Waiting for rollback containers..."
+
+                        sleep 20
+
+                        echo "Checking rollback containers..."
+
                         docker compose ps
 
-                        echo "Checking API health..."
+                        echo "Checking rollback API health..."
 
-                        for i in 1 2 3 4 5 6; do
-                            if curl -fsS http://localhost:3000/health; then
-                                echo
-                                echo "API health check successful."
-                                break
-                            fi
+                        curl -fsS http://localhost:3000/health
 
-                            echo "API not ready yet. Waiting..."
-                            sleep 5
+                        echo
 
-                            if [ "$i" = "6" ]; then
-                                echo "API health check failed."
-                                docker compose logs --tail=100 api
-                                exit 1
-                            fi
-                        done
-
-                        echo "Checking employee API..."
+                        echo "Checking rollback employee API..."
 
                         curl -fsS http://localhost:3000/user
 
                         echo
-                        echo "Deployment verification successful."
+
+                        echo "======================================"
+                        echo "ROLLBACK COMPLETED SUCCESSFULLY"
+                        echo "======================================"
 
 REMOTE_SCRIPT
                     '''
@@ -342,8 +536,10 @@ Docker Build             : SUCCESS
 Image Verification       : SUCCESS
 Trivy Scan               : SUCCESS
 Docker Hub Push          : SUCCESS
+EC2 Image Backup         : SUCCESS
 EC2 Deployment           : SUCCESS
 Deployment Verification  : SUCCESS
+Rollback                 : NOT REQUIRED
 Docker Cleanup           : SUCCESS
 ======================================
 '''
@@ -355,6 +551,7 @@ Docker Cleanup           : SUCCESS
 JENKINS CI/CD PIPELINE FAILED
 ======================================
 Check the failed stage and console log.
+If deployment failed, rollback was attempted.
 ======================================
 '''
         }
